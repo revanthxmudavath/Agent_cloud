@@ -28,6 +28,12 @@ database_id = "dd9dba33-fda6-45dc-9348-150b822a4516"
 binding = "VECTORIZE"
 index_name = "agent-memory"
 
+# Workflows for multi step tasks
+[[workflows]]
+binding = "TASK_WORKFLOW"
+name = "task-workflow"
+class_name = "TaskWorkflow"
+
 # Durable Object migrations
 [[migrations]]
 tag = "v1"

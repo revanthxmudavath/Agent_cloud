@@ -1,11 +1,12 @@
 export interface Env {
     AI: Ai;
-    AI_GATEWAY: any;
+    // AI_GATEWAY: any;
 
     AGENT: DurableObjectNamespace;
     DB: D1Database;
 
     VECTORIZE: VectorizeIndex;
+    TASK_WORKFLOW: Workflow<TaskWorkflowParams>;
 
     ENVIRONMENT?: string;
 }
@@ -48,4 +49,31 @@ export interface AgentState {
     activeWebSockets: number;
     lastActivity: number;
 }
+
+export interface TaskWorkflowParams {
+    userId: string;
+    taskId: string;
+    action: 'reminder' | 'decompose' | 'schedule' | 'cleanup';
+    dueDate?: number;
+    taskDetails?: {
+        title: string;
+        description?: string;
+        priority?: 'low' | 'medium' | 'high';
+    };
+}
+
+export interface WorkflowStepResult {
+    success: boolean;
+    message: string;
+    data?: any;
+    error?: string;
+}
+
+export interface ReminderResult extends WorkflowStepResult {
+    reminderSent?: boolean;
+    scheduledFor?: number;
+    taskId?: string;
+}
+
+
 

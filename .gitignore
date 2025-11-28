@@ -239,3 +239,6 @@ Thumbs.db
 update-info.md
 .wrangler/
 pnpm-lock.yaml 
+errors.md 
+.claude/
+CLAUDE.md
