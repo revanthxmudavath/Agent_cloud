@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { Env, AgentState, Message, Task, TaskWorkflowParams } from '../types/env';
 import { VectorizeManager } from './vectorize';
+import { MemoryManager, DEFAULT_SYSTEM_PROMPT, memoryManager } from './memory';
 
 interface WebSocketSession {
   webSocket: WebSocket;
@@ -476,8 +477,157 @@ private async loadConversationHistory(userId: string, limit: number = 50): Promi
       timestamp: (row.timestamp as number) * 1000,
       metadata: row.metadata ? JSON.parse(row.metadata as string) : undefined,
     }));
+
 }
 
+// Generate LLM response using worker AI
+private async generateLLMResponse(
+  userId: string,
+  userMessage: string,
+  conversationHistory: Message[]
+): Promise<string> {
+
+    try {
+      const context = memoryManager.buildContext(conversationHistory, {
+        maxTokens: 3500,
+        maxMessages: 50,
+        systemPrompt: DEFAULT_SYSTEM_PROMPT,
+      });
+
+      const messages = memoryManager.formatForLLM(context);
+
+      const model = this.env.LLM_MODEL || '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
+      const modelKey = (model as unknown) as keyof AiModels;
+      if(!modelKey) throw new Error('No valid LLM model available');
+
+      
+      const maxTokens = parseInt(this.env.LLM_MAX_TOKENS || '500');
+      const temperature = parseFloat(this.env.LLM_TEMPERATURE || '0.7');
+
+      console.log(`[LLM] Calling model: ${model}, tokens: ${context.totalTokens}, truncated: ${context.truncated}`);
+
+      const timeoutPromise = new Promise<never>((_, reject) => 
+        setTimeout(() => reject(new Error('LLM timeout after 25s')), 25000)
+        );
+
+      const llmPromise = this.env.AI.run(modelKey, {
+        messages,
+        max_tokens: maxTokens,
+        temperature,
+        stream: false,
+      }) as Promise<{ response: string }>;
+
+      const response = await Promise.race([llmPromise, timeoutPromise]);
+
+      const responseText = response?.response?.trim();
+      if(!responseText) {
+        throw new Error ('Empty response from LLM');
+      }
+
+      console.log(`[LLM] Response generated: ${responseText.length} chars`);
+      return responseText;
+
+    } catch (error) {
+      console.error('[LLM] Error generating response:', error);
+
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+      if (errorMessage.includes('timeout')) {
+     return 'I apologize, but my response took too long. Please try again.';
+      } 
+      
+      else if (errorMessage.includes('429') || errorMessage.includes('rate limit')) {
+        return 'I am experiencing high demand. Please try again in a moment.';
+      } 
+      
+       else {
+        return 'I encountered an error processing your message. Please try again.';
+      }
+    }
+  }
+
+  private async generateLLMResponseWithRAG(
+    userId: string,
+    userMessage: string,
+    conversationHistory: Message[]
+  ): Promise<string> {
+
+    try {
+
+      const rag_enabled = this.env.RAG_ENABLED !== 'false';
+      if(!rag_enabled){
+        console.log('[RAG] RAG disabled via environment variable');
+        return await this.generateLLMResponse(userId, userMessage, conversationHistory);
+      }
+
+      const topK = parseInt(this.env.RAG_TOP_K || '3');
+      console.log(`[RAG] Retrieving top ${topK} relevant items for user: ${userId}`);
+
+      const [relevantHistory, relevantKnowledge] = await Promise.all([
+        this.vectorize.getRelevantHistory(userId, userMessage, topK),
+        this.vectorize.getRelevantKnowledge(userId, userMessage, Math.floor(topK / 2)),
+      ]);
+
+      const retrievedContext = [...relevantHistory, ...relevantKnowledge];
+
+      if (retrievedContext.length === 0){
+        console.log('[RAG] No relevant context found, using standard response');
+        return await this.generateLLMResponse(userId, userMessage, conversationHistory);
+      }
+      
+      console.log(`[RAG] Found ${retrievedContext.length} relevant items`);
+
+      const context = memoryManager.prepareRAGContext(
+        conversationHistory,
+        retrievedContext,
+        {
+          maxTokens: 3500,
+          maxMessages: 50,
+          systemPrompt: DEFAULT_SYSTEM_PROMPT,
+        }
+      );
+
+      const messages = memoryManager.formatForLLM(context);
+
+      const model = this.env.LLM_MODEL || '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
+
+      const modelKey = (model as unknown) as keyof AiModels;
+      if (!modelKey) throw new Error('No valid LLM model available');
+
+      const maxTokens = parseInt(this.env.LLM_MAX_TOKENS || '500');
+      const temperature = parseFloat(this.env.LLM_TEMPERATURE || '0.7');
+
+      console.log(`[LLM] Calling with RAG context - tokens: ${context.totalTokens}, truncated: ${context.truncated}`);
+
+      const timeoutPromise = new Promise<never>((_, reject) => 
+      setTimeout(() => reject(new Error('LLM timeout after 25s')), 25000)
+    );
+
+      const llmPromise = this.env.AI.run(modelKey, {
+        messages,
+        max_tokens: maxTokens,
+        temperature,
+        stream: false,
+      }) as Promise<{ response: string }>;
+
+      const response = await Promise.race([llmPromise, timeoutPromise]);
+
+      const responseText = response?.response?.trim();
+
+      if (!responseText) {
+        throw new Error('Empty response from LLM');
+      }
+
+      console.log(`[LLM] RAG-enhanced response generated: ${responseText.length} chars`);
+      return responseText;
+
+    } catch (error) {
+      console.error('[RAG] Error generating RAG response, falling back to standard:', error);
+
+      // Fallback to non-RAG on error
+      return await this.generateLLMResponse(userId, userMessage, conversationHistory);
+    }
+  }
   // ==================== WebSocket Message Handlers ====================
 
   // Handle chat messages (placeholder - will be implemented with LLM in Phase 3)
@@ -505,9 +655,12 @@ private async loadConversationHistory(userId: string, limit: number = 50): Promi
       console.warn(`Failed to store user message embedding: ${userMessage.id}`);
     }
 
-    // TODO: Phase 3 - Generate LLM response
-    // For now, send a placeholder response
-    const responseContent = `Echo: ${content}`;
+    const responseContent = await this.generateLLMResponseWithRAG(
+      session.userId,
+      content,
+      this.state.conversationHistory
+    );
+
     const assistantMessage: Message = {
       id: crypto.randomUUID(),
       role: 'assistant',

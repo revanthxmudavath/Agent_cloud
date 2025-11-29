@@ -42,3 +42,9 @@ new_sqlite_classes = ["PersonalAssistant"]
 # Environment variables (optional)
 [vars]
 ENVIRONMENT = "development"
+
+LLM_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+LLM_MAX_TOKENS = "500"
+LLM_TEMPERATURE = "0.7"
+RAG_ENABLED = "true"
+RAG_TOP_K = "3"

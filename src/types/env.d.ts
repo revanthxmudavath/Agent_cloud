@@ -9,6 +9,12 @@ export interface Env {
     TASK_WORKFLOW: Workflow<TaskWorkflowParams>;
 
     ENVIRONMENT?: string;
+
+    LLM_MODEL?: string;
+    LLM_MAX_TOKENS?: string;
+    LLM_TEMPERATURE?: string;
+    RAG_ENABLED?: string;
+    RAG_TOP_K?: string;
 }
 
 export interface Message {
