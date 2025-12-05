@@ -3,6 +3,12 @@ import { Env, AgentState, Message, Task, TaskWorkflowParams } from '../types/env
 import { VectorizeManager } from './vectorize';
 import { MemoryManager, DEFAULT_SYSTEM_PROMPT, memoryManager } from './memory';
 
+import { CodeExecutor, createCodeExecutor } from '../mcp/CodeExecutor';
+import { ConfirmationHandler, createConfirmationHandler } from '../mcp/ConfirmationHandler';
+import { generateToolDocs } from '../mcp/CodeModeAPI';
+import { ToolContext } from '../types/tools';
+
+
 interface WebSocketSession {
   webSocket: WebSocket;
   userId: string;
@@ -14,10 +20,12 @@ export class PersonalAssistant extends DurableObject<Env> {
   private state: AgentState;
   private userId: string;
   private vectorize: VectorizeManager;
+  private confirmationHandler: ConfirmationHandler;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.vectorize = new VectorizeManager(env);
+    this.confirmationHandler = createConfirmationHandler(60000);
 
     this.sessions = new Map();
     this.userId = '';
@@ -177,13 +185,23 @@ export class PersonalAssistant extends DurableObject<Env> {
       }
 
 
+      const payload = (data && typeof data.payload === 'object' && data.payload !== null)
+        ? data.payload
+        : data;
+
       switch (data.type) {
-        case 'chat':
-          await this.handleChatMessage(ws, session, data.content);
+        case 'chat': {
+          const content = payload?.content;
+          if (typeof content !== 'string' || !content.trim()) {
+            ws.send(JSON.stringify({ error: 'Chat message content is required' }));
+            return;
+          }
+          await this.handleChatMessage(ws, session, content);
           break;
+        }
 
         case 'create_task':
-          await this.handleCreateTask(ws, session, data);
+          await this.handleCreateTask(ws, session, payload);
           break;
 
         case 'list_tasks':
@@ -191,19 +209,23 @@ export class PersonalAssistant extends DurableObject<Env> {
           break;
 
         case 'complete_task':
-          await this.handleCompleteTask(ws, session, data.taskId);
+          await this.handleCompleteTask(ws, session, payload.taskId);
           break;
 
         case 'update_task':
-          await this.handleUpdateTask(ws, session, data);
+          await this.handleUpdateTask(ws, session, payload);
           break;
 
         case 'delete_task':
-          await this.handleDeleteTask(ws, session, data.taskId);
+          await this.handleDeleteTask(ws, session, payload.taskId);
           break;
 
         case 'ping':
           ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
+          break;
+        
+        case 'confirmation_response':
+          await this.handleConfirmationResponse(ws, session, payload);
           break;
 
         default:
@@ -661,6 +683,24 @@ private async generateLLMResponse(
       this.state.conversationHistory
     );
 
+    const codeBlocks = this.extractCodeBlocks(responseContent);
+
+    if (codeBlocks.length > 0) {
+      console.log(`[PersonalAssistant] Detected ${codeBlocks.length} code block(s) in response`);
+
+      for (const code of codeBlocks) {
+        const executionResult = await this.executeCodeWithConfirmation(ws, session, code);
+
+        ws.send(JSON.stringify({
+          type: 'code_execution_result',
+          success: executionResult.success,
+          output: executionResult.output,
+          error: executionResult.error,
+          timestamp: Date.now(),
+        }));
+      }
+    }
+
     const assistantMessage: Message = {
       id: crypto.randomUUID(),
       role: 'assistant',
@@ -858,6 +898,177 @@ private async generateLLMResponse(
         timestamp: Date.now(),
       }));
     }
+  }
+
+  // Handle confirmation response from user
+  private async handleConfirmationResponse(ws: WebSocket, session: WebSocketSession, data: any) {
+    try {
+      const response = {
+        requestId: data.requestId,
+        approved: data.approved,
+        timestamp: data.timestamp || Date.now(),
+      };
+
+      const processed = this.confirmationHandler.handleConfirmationResponse(response);
+
+      if (processed) {
+        console.log(`[PersonalAssistant] Confirmation response processed: ${response.requestId}`);
+      } else {
+        console.warn(`[PersonalAssistant] Unknown confirmation request: ${response.requestId}`);
+        ws.send(JSON.stringify({
+          type: 'error',
+          error: 'Confirmation request not found or expired',
+          timestamp: Date.now(),
+        }));
+      }
+    } catch (error) {
+      console.error('[PersonalAssistant] Error handling confirmation response:', error);
+      ws.send(JSON.stringify({
+        type: 'error',
+        error: 'Failed to process confirmation response',
+        details: error instanceof Error ? error.message : 'Unknown error',
+        timestamp: Date.now(),
+      }));
+    }
+  }
+
+  // Extract code blocks from LLM response
+  private extractCodeBlocks(text: string): string[] {
+    const codeBlockRegex = /```(?:typescript|javascript|ts|js)\n([\s\S]*?)```/g;
+    const matches: string[] = [];
+    let match;
+
+    while ((match = codeBlockRegex.exec(text)) !== null) {
+      matches.push(match[1].trim());
+    }
+
+    return matches;
+  }
+
+/**
+   * Execute LLM-generated code with user confirmation
+   */
+  private async executeCodeWithConfirmation(
+    ws: WebSocket,
+    session: WebSocketSession,
+    code: string
+  ): Promise<{ success: boolean; output?: any; error?: string }> {
+
+    try {
+      console.log('[PersonalAssistant] Preparing code execution');
+
+ 
+      const toolContext: ToolContext = {
+        userId: session.userId,
+        env: this.env,
+        agent: this, 
+      };
+
+      
+      const executor = createCodeExecutor(toolContext, 10000); 
+
+     
+      const validation = CodeExecutor.validateCode(code);
+      if (!validation.valid) {
+        console.error('[PersonalAssistant] Code validation failed:', validation.errors);
+        return {
+          success: false,
+          error: `Code validation failed: ${validation.errors.join(', ')}`,
+        };
+      }
+
+      // Pre-execute to extract tool calls (dry run)
+      // We need to know what tools will be called before asking for confirmation
+      console.log('[PersonalAssistant] Extracting tool calls from code');
+
+      // For now, we'll parse the code to extract tool calls
+      // In a more sophisticated version, you could do a dry-run execution
+      const toolCalls = this.extractToolCallsFromCode(code);
+
+      if (toolCalls.length === 0) {
+        console.log('[PersonalAssistant] No tool calls detected, executing directly');
+        
+        const result = await executor.execute({ code, userId: session.userId });
+        return result;
+      }
+
+      console.log(`[PersonalAssistant] Found ${toolCalls.length} tool call(s), requesting confirmation`);
+
+    
+      const approved = await this.confirmationHandler.requestConfirmation(
+        session.userId,
+        code,
+        toolCalls,
+        (request) => {
+          ws.send(JSON.stringify({
+            type: 'confirmation_request',
+            payload: request,
+            timestamp: Date.now(),
+          }));
+        },
+        60000 
+      );
+
+      if (!approved) {
+        console.log('[PersonalAssistant] Code execution rejected by user');
+        return {
+          success: false,
+          error: 'Code execution rejected or timed out',
+        };
+      }
+
+      console.log('[PersonalAssistant] Code execution approved, executing now');
+
+   
+      const result = await executor.execute({ code, userId: session.userId });
+
+      console.log('[PersonalAssistant] Code execution completed:', result.success ? 'SUCCESS' : 'FAILED');
+
+      return result;
+
+    } catch (error) {
+      console.error('[PersonalAssistant] Error in code execution:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      };
+    }
+  }
+
+  /**
+   * Extract tool calls from code (simple regex-based extraction)
+   * This is a simplified version - in production you might want more sophisticated parsing
+   */
+  private extractToolCallsFromCode(code: string): any[] {
+    const toolCalls: any[] = [];
+
+   
+    const toolCallRegex = /tools\.(\w+)\s*\(\s*({[\s\S]*?})\s*\)/g;
+    let match;
+
+    while ((match = toolCallRegex.exec(code)) !== null) {
+      const toolName = match[1];
+      const paramsStr = match[2];
+
+      try {
+        const parameters = JSON.parse(paramsStr);
+
+        toolCalls.push({
+          toolName,
+          parameters,
+          description: `Calling ${toolName} with parameters`,
+        });
+      } catch (e) {
+       
+        toolCalls.push({
+          toolName,
+          parameters: { raw: paramsStr },
+          description: `Calling ${toolName}`,
+        });
+      }
+    }
+
+    return toolCalls;
   }
 
   // Load state from Durable Object storage
