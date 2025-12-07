@@ -151,6 +151,3 @@ agent-cloud/
 - `npm run deploy` - Deploy to Cloudflare
 - `npm run d1:migrate` - Run database migrations
 
-## License
-
-MIT
