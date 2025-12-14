@@ -676,7 +676,7 @@ private async generateLLMResponse(
   }
   // ==================== WebSocket Message Handlers ====================
 
-  // Handle chat messages (placeholder - will be implemented with LLM in Phase 3)
+  // Handle chat messages 
   private async handleChatMessage(ws: WebSocket, session: WebSocketSession, content: string) {
    
     await this.ensureUser(session.userId);
@@ -709,6 +709,8 @@ private async generateLLMResponse(
     if (toolCalls.length > 0) {
       console.log(`[PersonalAssistant] Detected ${toolCalls.length} tool call(s) in response`);
 
+      const toolResultMessage: string[] = [];
+
       for (const toolCall of toolCalls) {
         const executionResult = await this.executeToolsWithConfirmation(ws, session, toolCall);
 
@@ -722,39 +724,56 @@ private async generateLLMResponse(
           },
           timestamp: Date.now(),
         }));
-      }
 
-      // Don't send JSON blocks as chat message - they're not user-friendly
-      // User will see tool execution results instead
-      return;
+    const formattedResult = this.formatToolResultAsSystemMessage(toolCall.tool, executionResult);
+    toolResultMessage.push(formattedResult);
+
+    const systemMessage: Message = {
+      id: crypto.randomUUID(),
+      role: 'system',
+      content: formattedResult,
+      timestamp: Date.now(),
+    };
+    this.state.conversationHistory.push(systemMessage);
+
+    await this.saveMessageToD1(session.userId, systemMessage);
     }
+
+    console.log('[PersonalAssistant] Calling LLM with tool results in context');
+    const followUpResponse = await this.generateLLMResponseWithRAG(
+      session.userId,
+      content,
+      this.state.conversationHistory 
+    );
 
     const assistantMessage: Message = {
       id: crypto.randomUUID(),
       role: 'assistant',
-      content: responseContent,
+      content: followUpResponse,
       timestamp: Date.now(),
     };
     this.state.conversationHistory.push(assistantMessage);
 
     await this.saveMessageToD1(session.userId, assistantMessage);
 
-    // Store assistant message embedding (silently fails if Vectorize unavailable in local dev)
-    await this.vectorize.storeMessageEmbedding(
-      session.userId,
-      assistantMessage,
-      'conversation'
-    );
+    // // Store assistant message embedding (silently fails if Vectorize unavailable in local dev)
+    // await this.vectorize.storeMessageEmbedding(
+    //   session.userId,
+    //   assistantMessage,
+    //   'conversation'
+    // );
 
     ws.send(JSON.stringify({
       type: 'chat_response',
       payload: {
-        content: responseContent,
+        content: followUpResponse,
         messageId: assistantMessage.id,
       },
-      timestamp: Date.now(),
+      timestamp: assistantMessage.timestamp,
     }));
+    return;
   }
+}
 
   // Handle task creation
   private async handleCreateTask(ws: WebSocket, session: WebSocketSession, data: any) {
@@ -1144,6 +1163,62 @@ private async generateLLMResponse(
       };
     }
   }
+
+// Convert raw tool output to contextual information for LLM
+private formatToolResultAsSystemMessage(
+  toolName: string,
+  result: { success: boolean; output?: any; error?: string 
+  }
+): string {
+  if (!result.success) {
+    return `[Tool Execution] ${toolName} failed: ${result.error || 'Unknown error'}`;
+  }
+
+     switch (toolName) {
+        case 'getWeather': {
+          const weather = result.output as any;
+          return `[Weather Data Retrieved] ${weather.city}, ${weather.country}: ${weather.temperature}°C (feels like ${weather.feelsLike}°C), ${weather.description}. Humidity: ${weather.humidity}%, Wind: ${weather.windSpeed} m/s`;
+        }
+
+        case 'sendEmail': {
+          const email = result.output as any;
+          return `[Email Sent] Successfully sent email to ${email.to} at ${email.submittedAt}. Message ID: ${email.messageId}`;
+        }
+
+        case 'createTask': {
+          const task = result.output as any;
+          return `[Task Created] "${task.title}" (ID: ${task.id}, Priority: ${task.priority}${task.dueDate ? ', Due: ' + new Date(task.dueDate).toISOString() : ''})`;   
+        }
+
+        case 'listTasks': {
+          const tasks = result.output as any[];
+          if (tasks.length === 0) {
+            return `[Task List] No tasks found`;
+          }
+          const taskList = tasks.map(t => `- ${t.title} (${t.completed ? 'completed' : 'pending'})`).join('\n');
+          return `[Task List] Found ${tasks.length} task(s):\n${taskList}`;
+        }
+
+        case 'updateTask': {
+          const task = result.output as any;
+          return `[Task Updated] "${task.title}" has been updated successfully`;
+        }
+
+        case 'completeTask': {
+          const task = result.output as any;
+          return `[Task Completed] "${task.title}" marked as complete`;
+        }
+
+        case 'deleteTask': {
+          return `[Task Deleted] Task has been removed successfully`;
+        }
+
+        default: {
+          // Generic fallback for unknown tools
+          return `[Tool Executed] ${toolName} completed successfully with result: ${JSON.stringify(result.output)}`;
+        }
+      }
+    }
 
 
   // Load state from Durable Object storage
