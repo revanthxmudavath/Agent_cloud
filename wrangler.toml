@@ -20,7 +20,7 @@ script_name = "agent-db"
 # D1 Database for persistent storage
 [[d1_databases]]
 binding = "DB"
-database_name = "agent_cloud_db"
+database_name = "agent_db"
 database_id = "dd9dba33-fda6-45dc-9348-150b822a4516"
 
 # Vectorize for semantic memory/RAG
@@ -39,6 +39,10 @@ class_name = "TaskWorkflow"
 tag = "v1"
 new_sqlite_classes = ["PersonalAssistant"]
 
+# CPU Time Limits
+[limits]
+cpu_ms = 90000
+
 # Environment variables (optional)
 [vars]
 ENVIRONMENT = "development"
@@ -48,13 +52,3 @@ LLM_MAX_TOKENS = "500"
 LLM_TEMPERATURE = "0.7"
 RAG_ENABLED = "true"
 RAG_TOP_K = "3"
-
-# MCP Tool API Keys (actual values stored in .dev.vars)
-OPENWEATHER_API_KEY = "your-openweather-api-key-here"
-POSTMARK_API_KEY = "your-postmark-api-key-here"
-POSTMARK_FROM_EMAIL = "noreply@yourdomain.com"
-
-# Code Mode Configuration (Optional - defaults set in code)
-CODE_EXECUTION_TIMEOUT = "10000"
-CONFIRMATION_TIMEOUT = "60000"
-MAX_CODE_LENGTH = "5000"

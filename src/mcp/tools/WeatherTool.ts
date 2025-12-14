@@ -10,13 +10,21 @@ export const getWeatherTool: ToolDefinition = {
     async execute(params: GetWeatherParams, context: ToolContext): Promise<ToolResult> {
 
         try {
-            const { city, countryCode } = params; 
+            const { city, countryCode } = params;
             const apiKey = context.env.OPENWEATHER_API_KEY;
 
             if (!apiKey) {
                 return {
                     success: false,
                     error: 'OpenWeatherMap API key not configured',
+          };
+        }
+
+        // Security: Rate limiting - 10 calls per hour per user
+        if (!context.agent.checkRateLimit(context.userId, 'weather', 10, 3600000)) {
+          return {
+            success: false,
+            error: 'Rate limit exceeded. You can make up to 10 weather requests per hour. Please try again later.',
           };
         }
 
@@ -50,6 +58,9 @@ export const getWeatherTool: ToolDefinition = {
           windSpeed: data.wind.speed,
           timestamp: data.dt,
         }
+
+        // Record successful API call for rate limiting
+        context.agent.recordRateLimitCall(context.userId, 'weather');
 
         return {
           success: true,

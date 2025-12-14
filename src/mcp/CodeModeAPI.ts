@@ -83,7 +83,7 @@ ${docs}
         return `{
     "to": "user@example.com",
     "subject": "Subject",
-    "body": "Message"
+    "textBody": "Email message body text here"
   }`;
       default:
         return `{}`;

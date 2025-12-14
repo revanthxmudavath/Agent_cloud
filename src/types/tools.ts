@@ -24,10 +24,23 @@ export interface ToolResult {
 
 // Task schemas
 
+// Helper to parse date strings to Unix timestamps
+const dueDatePreprocess = z.preprocess(
+    (val) => {
+        if (typeof val === 'number') return val; // Already a timestamp
+        if (typeof val === 'string') {
+            const parsed = new Date(val).getTime();
+            return isNaN(parsed) ? undefined : parsed; // Convert string to timestamp
+        }
+        return undefined; // Invalid type
+    },
+    z.number().optional()
+);
+
 export const CreateTaskSchema = z.object({
     title: z.string().min(1).max(200),
     description: z.string().optional(),
-    dueDate: z.number().optional(),
+    dueDate: dueDatePreprocess,
     priority: z.enum(['low', 'medium', 'high']).optional(),
 
 });
@@ -41,7 +54,7 @@ export const UpdateTaskSchema = z.object({
       taskId: z.string().uuid(),
       title: z.string().min(1).max(200).optional(),
       description: z.string().optional(),
-      dueDate: z.number().optional(),
+      dueDate: dueDatePreprocess,
       priority: z.enum(['low', 'medium', 'high']).optional(),
   });
 
@@ -96,6 +109,7 @@ export interface ConfirmationRequest {
     userId: string;
     code: string;
     toolCalls: ToolCallSummary[];
+    timeout: number;
     timestamp: number;
 }
 

@@ -60,6 +60,7 @@ export class ConfirmationHandler {
             userId,
             code,
             toolCalls,
+            timeout: timeoutMs,
             timestamp: Date.now(),
         };
 

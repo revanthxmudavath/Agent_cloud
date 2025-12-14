@@ -1,16 +1,29 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { CheckCircle, XCircle, Clock, AlertTriangle } from 'lucide-react';
 import { useAppStore } from '../stores/appStore';
-import { useWebSocket } from '../hooks/useWebSocket';
+import type { WSMessageType } from '../types/index';
 
-export function ConfirmationDialog() {
-const userId = useAppStore((state) => state.userId);
+interface ConfirmationDialogProps {
+  sendMessage: (type: WSMessageType, payload: any) => boolean;
+}
+
+export function ConfirmationDialog({ sendMessage }: ConfirmationDialogProps) {
 const pendingConfirmation = useAppStore((state) => state.pendingConfirmation);
 const clearPendingConfirmation = useAppStore((state) => state.clearPendingConfirmation);
 
-const { sendMessage } = useWebSocket(userId);
-
 const [timeRemaining, setTimeRemaining] = useState<number>(0);
+
+const handleReject = useCallback(() => {
+    if (!pendingConfirmation) return;
+
+    sendMessage('confirmation_response', {
+    requestId: pendingConfirmation.requestId,
+    approved: false,
+    timestamp: Date.now(),
+    });
+
+    clearPendingConfirmation();
+}, [pendingConfirmation, sendMessage, clearPendingConfirmation]);
 
 // Calculate time remaining
 useEffect(() => {
@@ -33,7 +46,7 @@ useEffect(() => {
     const interval = setInterval(updateTimer, 100);
 
     return () => clearInterval(interval);
-}, [pendingConfirmation]);
+}, [pendingConfirmation, handleReject]);
 
 const handleApprove = () => {
     if (!pendingConfirmation) return;
@@ -41,18 +54,6 @@ const handleApprove = () => {
     sendMessage('confirmation_response', {
     requestId: pendingConfirmation.requestId,
     approved: true,
-    timestamp: Date.now(),
-    });
-
-    clearPendingConfirmation();
-};
-
-const handleReject = () => {
-    if (!pendingConfirmation) return;
-
-    sendMessage('confirmation_response', {
-    requestId: pendingConfirmation.requestId,
-    approved: false,
     timestamp: Date.now(),
     });
 

@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   priority TEXT DEFAULT 'medium', -- low, medium, high
   created_at INTEGER DEFAULT (unixepoch()),
   completed_at INTEGER,
-  FOREIGN KEY (user_id) REFERENCES users(id)
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
 -- Conversation history for long-term memory
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS conversations (
   content TEXT NOT NULL,
   timestamp INTEGER DEFAULT (unixepoch()),
   metadata TEXT, -- JSON blob for additional context
-  FOREIGN KEY (user_id) REFERENCES users(id)
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
 -- Knowledge base entries for RAG
@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS knowledge_entries (
   content TEXT NOT NULL,
   vector_id TEXT, -- Reference to Vectorize index
   created_at INTEGER DEFAULT (unixepoch()),
-  FOREIGN KEY (user_id) REFERENCES users(id)
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
 -- Indexes for performance
@@ -50,3 +50,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_due_date ON tasks(due_date);
 CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_timestamp ON conversations(timestamp);
 CREATE INDEX IF NOT EXISTS idx_knowledge_user_id ON knowledge_entries(user_id);
+
+-- Composite indexes for optimized queries
+CREATE INDEX IF NOT EXISTS idx_tasks_id_user_id ON tasks(id, user_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_user_completed_due ON tasks(user_id, completed, due_date);

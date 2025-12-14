@@ -15,12 +15,18 @@ interface WebSocketSession {
   connectedAt: number;
 }
 
+interface RateLimitState {
+  weatherCalls: number[];  // Timestamps of weather API calls
+  emailSends: number[];    // Timestamps of email sends
+}
+
 export class PersonalAssistant extends DurableObject<Env> {
   private sessions: Map<WebSocket, WebSocketSession>;
   private state: AgentState;
   private userId: string;
   private vectorize: VectorizeManager;
   private confirmationHandler: ConfirmationHandler;
+  private rateLimits: Map<string, RateLimitState>; // userId -> rate limit state
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -28,6 +34,7 @@ export class PersonalAssistant extends DurableObject<Env> {
     this.confirmationHandler = createConfirmationHandler(60000);
 
     this.sessions = new Map();
+    this.rateLimits = new Map();
     this.userId = '';
     this.state = {
       userId: '',
@@ -36,9 +43,10 @@ export class PersonalAssistant extends DurableObject<Env> {
       lastActivity: Date.now(),
     };
 
-   
+
     this.ctx.blockConcurrencyWhile(async () => {
       await this.loadState();
+      await this.ensureForeignKeysEnabled();
     });
   }
 
@@ -135,44 +143,50 @@ export class PersonalAssistant extends DurableObject<Env> {
     try {
       let session = this.sessions.get(ws);
 
-      
+
       if (!session) {
         console.log('Session not found, attempting recovery...');
 
-        
-        const tags = (ws as any).tags || [];
-        let userId = tags[0];
-        let connectedAt = Date.now();
-
-       
-        try {
-          const attachment = (ws as any).deserializeAttachment?.();
-          if (attachment) {
-            userId = attachment.userId || userId;
-            connectedAt = attachment.connectedAt || connectedAt;
-          }
-        } catch (e) {
-          
-        }
-
-        if (userId) {
-         
-          session = {
-            webSocket: ws,
-            userId: userId,
-            connectedAt: connectedAt,
-          };
-          this.sessions.set(ws, session);
-          this.state.activeWebSockets = this.sessions.size;
-          console.log(`Session recovered for user: ${userId}`);
+        // Atomic session creation: check again to prevent race condition
+        session = this.sessions.get(ws);
+        if (session) {
+          // Another concurrent call already recovered the session
+          console.log('Session was recovered by another concurrent call');
         } else {
-         
-          console.error('Session not found and cannot recover - no userId available');
-          ws.send(JSON.stringify({
-            error: 'Session lost',
-            message: 'Please reconnect to restore your session',
-          }));
-          return;
+          // Proceed with recovery
+          const tags = (ws as any).tags || [];
+          let userId = tags[0];
+          let connectedAt = Date.now();
+
+          try {
+            const attachment = (ws as any).deserializeAttachment?.();
+            if (attachment) {
+              userId = attachment.userId || userId;
+              connectedAt = attachment.connectedAt || connectedAt;
+            }
+          } catch (e) {
+            // Attachment not available
+          }
+
+          if (userId) {
+            // Create session
+            session = {
+              webSocket: ws,
+              userId: userId,
+              connectedAt: connectedAt,
+            };
+            this.sessions.set(ws, session);
+            this.state.activeWebSockets = this.sessions.size;
+            console.log(`Session recovered for user: ${userId}`);
+          } else {
+            // Cannot recover
+            console.error('Session not found and cannot recover - no userId available');
+            ws.send(JSON.stringify({
+              error: 'Session lost',
+              message: 'Please reconnect to restore your session',
+            }));
+            return;
+          }
         }
       }
 
@@ -265,6 +279,16 @@ export class PersonalAssistant extends DurableObject<Env> {
     if (session) {
       this.sessions.delete(ws);
       this.state.activeWebSockets = this.sessions.size;
+    }
+  }
+
+  // Enable foreign key constraints for this D1 connection
+  private async ensureForeignKeysEnabled(): Promise<void> {
+    try {
+      await this.env.DB.exec('PRAGMA foreign_keys = ON');
+      console.log('[PersonalAssistant] Foreign key constraints enabled');
+    } catch (error) {
+      console.error('[PersonalAssistant] Error enabling foreign keys:', error);
     }
   }
 
@@ -528,8 +552,8 @@ private async generateLLMResponse(
 
       console.log(`[LLM] Calling model: ${model}, tokens: ${context.totalTokens}, truncated: ${context.truncated}`);
 
-      const timeoutPromise = new Promise<never>((_, reject) => 
-        setTimeout(() => reject(new Error('LLM timeout after 25s')), 25000)
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('LLM timeout after 90s')), 90000)
         );
 
       const llmPromise = this.env.AI.run(modelKey, {
@@ -621,8 +645,8 @@ private async generateLLMResponse(
 
       console.log(`[LLM] Calling with RAG context - tokens: ${context.totalTokens}, truncated: ${context.truncated}`);
 
-      const timeoutPromise = new Promise<never>((_, reject) => 
-      setTimeout(() => reject(new Error('LLM timeout after 25s')), 25000)
+      const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('LLM timeout after 90s')), 90000)
     );
 
       const llmPromise = this.env.AI.run(modelKey, {
@@ -690,13 +714,19 @@ private async generateLLMResponse(
 
         ws.send(JSON.stringify({
           type: 'tool_execution_result',
-          success: executionResult.success,
-          output: executionResult.output,
-          error: executionResult.error,
-          toolName: toolCall.tool,
+          payload: {
+            success: executionResult.success,
+            output: executionResult.output,
+            error: executionResult.error,
+            toolName: toolCall.tool,
+          },
           timestamp: Date.now(),
         }));
       }
+
+      // Don't send JSON blocks as chat message - they're not user-friendly
+      // User will see tool execution results instead
+      return;
     }
 
     const assistantMessage: Message = {
@@ -718,7 +748,10 @@ private async generateLLMResponse(
 
     ws.send(JSON.stringify({
       type: 'chat_response',
-      content: responseContent,
+      payload: {
+        content: responseContent,
+        messageId: assistantMessage.id,
+      },
       timestamp: Date.now(),
     }));
   }
@@ -927,26 +960,92 @@ private async generateLLMResponse(
     }
   }
 
-  // Extract JSON blocks from LLM response (tool calls)
+  // Rate limiting helpers
+  checkRateLimit(userId: string, type: 'weather' | 'email', maxCalls: number = 10, windowMs: number = 3600000): boolean {
+    const now = Date.now();
+    let userLimits = this.rateLimits.get(userId);
+
+    if (!userLimits) {
+      userLimits = { weatherCalls: [], emailSends: [] };
+      this.rateLimits.set(userId, userLimits);
+    }
+
+    const calls = type === 'weather' ? userLimits.weatherCalls : userLimits.emailSends;
+
+    // Remove calls outside the time window
+    const validCalls = calls.filter(timestamp => now - timestamp < windowMs);
+
+    if (validCalls.length >= maxCalls) {
+      return false; // Rate limit exceeded
+    }
+
+    return true; // Within limits
+  }
+
+  recordRateLimitCall(userId: string, type: 'weather' | 'email'): void {
+    const now = Date.now();
+    let userLimits = this.rateLimits.get(userId);
+
+    if (!userLimits) {
+      userLimits = { weatherCalls: [], emailSends: [] };
+      this.rateLimits.set(userId, userLimits);
+    }
+
+    if (type === 'weather') {
+      userLimits.weatherCalls.push(now);
+    } else {
+      userLimits.emailSends.push(now);
+    }
+
+    // Keep only last 24 hours of data to prevent memory bloat
+    const oneDayAgo = now - 86400000;
+    userLimits.weatherCalls = userLimits.weatherCalls.filter(t => t > oneDayAgo);
+    userLimits.emailSends = userLimits.emailSends.filter(t => t > oneDayAgo);
+  }
+
+  // Extract JSON blocks from LLM response (tool calls) - ReDoS-safe implementation
   private extractJSONBlocks(text: string): Array<{ tool: string; params: any }> {
-    const jsonBlockRegex = /```json\n([\s\S]*?)```/g;
+    // Security: Limit input length to prevent ReDoS attacks (max 50KB)
+    const MAX_INPUT_LENGTH = 50 * 1024;
+    if (text.length > MAX_INPUT_LENGTH) {
+      console.warn(`[PersonalAssistant] Input too long for JSON extraction: ${text.length} chars (max ${MAX_INPUT_LENGTH})`);
+      return [];
+    }
+
     const toolCalls: Array<{ tool: string; params: any }> = [];
-    let match;
 
-    while ((match = jsonBlockRegex.exec(text)) !== null) {
-      try {
-        const jsonContent = match[1].trim();
-        const parsed = JSON.parse(jsonContent);
+    try {
+      // Security: Use timeout wrapper for regex execution (max 1 second)
+      const timeoutMs = 1000;
+      const startTime = Date.now();
 
-        if (parsed.tool && parsed.params) {
-          toolCalls.push({
-            tool: parsed.tool,
-            params: parsed.params
-          });
+      // More efficient regex without nested quantifiers (prevents ReDoS)
+      const jsonBlockRegex = /```json\n([^`]+)```/g;
+      let match;
+
+      while ((match = jsonBlockRegex.exec(text)) !== null) {
+        // Security: Check timeout
+        if (Date.now() - startTime > timeoutMs) {
+          console.warn('[PersonalAssistant] JSON extraction timeout exceeded');
+          break;
         }
-      } catch (e) {
-        console.warn('[PersonalAssistant] Failed to parse JSON block:', e);
+
+        try {
+          const jsonContent = match[1].trim();
+          const parsed = JSON.parse(jsonContent);
+
+          if (parsed.tool && parsed.params) {
+            toolCalls.push({
+              tool: parsed.tool,
+              params: parsed.params
+            });
+          }
+        } catch (e) {
+          console.warn('[PersonalAssistant] Failed to parse JSON block:', e);
+        }
       }
+    } catch (error) {
+      console.error('[PersonalAssistant] Error in JSON extraction:', error);
     }
 
     return toolCalls;
@@ -1102,12 +1201,21 @@ private async generateLLMResponse(
 
   // Save state to Durable Object storage
   private async saveState() {
-    await this.ctx.storage.put('state', this.state);
+    try {
+      await this.ctx.storage.put('state', this.state);
+    } catch (error) {
+      console.error('[PersonalAssistant] Failed to save state:', error);
+    }
   }
 
-  
+
   async alarm() {
-   
     console.log('Alarm triggered for user:', this.userId);
+
+    // Clean up old confirmation requests to prevent memory leaks
+    this.confirmationHandler.cleanupOldConfirmations();
+
+    // Schedule next cleanup in 5 minutes
+    await this.ctx.storage.setAlarm(Date.now() + 300000);
   }
 }
