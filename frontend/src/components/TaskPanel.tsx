@@ -1,9 +1,16 @@
 import { useAppStore } from '../stores/appStore';
 import { TaskItem } from './TaskItem';
 import { ChevronLeft, ChevronRight, ListTodo } from 'lucide-react';
-import type { TaskFilter } from '../types/index';
+import type { TaskFilter, WSMessageType } from '../types/index';
+import { useTasks } from '../hooks/useTasks';
 
-export function TaskPanel() {
+interface TaskPanelProps {
+  sendMessage: (type: WSMessageType, payload: any) => boolean;
+  isConnected: boolean;
+}
+
+export function TaskPanel({ sendMessage, isConnected }: TaskPanelProps) {
+const userId = useAppStore((state) => state.userId);
 const tasks = useAppStore((state) => state.getFilteredTasks());
 const taskFilter = useAppStore((state) => state.taskFilter);
 const setTaskFilter = useAppStore((state) => state.setTaskFilter);
@@ -11,14 +18,41 @@ const updateTask = useAppStore((state) => state.updateTask);
 const isSidebarOpen = useAppStore((state) => state.isSidebarOpen);
 const toggleSidebar = useAppStore((state) => state.toggleSidebar);
 
+// Fetch tasks from backend on mount and when userId changes
+useTasks(userId);
+
 const handleToggleComplete = (taskId: string) => {
     const task = tasks.find((t) => t.id === taskId);
     if (!task) return;
 
+    // Optimistic update for better UX
+    const newCompleted = !task.completed;
+    const newCompletedAt = newCompleted ? Date.now() : undefined;
+
     updateTask(taskId, {
-    completed: !task.completed,
-    completedAt: !task.completed ? Date.now() : undefined,
+      completed: newCompleted,
+      completedAt: newCompletedAt,
     });
+
+    // Sync to backend via WebSocket
+    if (isConnected) {
+      const success = sendMessage('complete_task', {
+        taskId: taskId,
+        completed: newCompleted,
+      });
+
+      if (!success) {
+        // Rollback on send failure
+        console.error('[TaskPanel] Failed to send task update, rolling back');
+        updateTask(taskId, {
+          completed: task.completed,
+          completedAt: task.completedAt,
+        });
+      }
+    } else {
+      console.warn('[TaskPanel] Not connected - task update not synced to backend');
+      // TODO: Queue updates for later sync when connection restored
+    }
 };
 
 const filters: { value: TaskFilter; label: string }[] = [

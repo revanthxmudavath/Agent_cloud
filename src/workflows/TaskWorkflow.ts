@@ -28,7 +28,7 @@ export class TaskWorkflow extends WorkflowEntrypoint<Env, TaskWorkflowParams> {
 
         switch (params.action) {
             case 'reminder':
-            return await this.handleReminderWorkflow(params, step);
+            return await this.handleReminderWorkflow(params, step, event);
 
             case 'decompose':
             return await this.handleDecomposeWorkflow(params, step);
@@ -62,18 +62,101 @@ export class TaskWorkflow extends WorkflowEntrypoint<Env, TaskWorkflowParams> {
      */
     private async handleReminderWorkflow(
         params: TaskWorkflowParams,
-        step: WorkflowStep
+        step: WorkflowStep,
+        event: WorkflowEvent<TaskWorkflowParams>
     ): Promise<ReminderResult> {
+        // Generate deterministic message ID for idempotent reminder sending
+        // Using timestamp + taskId ensures uniqueness while allowing deduplication
+        const workflowEventId = event.timestamp?.toString() || Date.now().toString();
 
-        const task = await step.do("verify-task", async () => {
-            console.log(`[TaskWorkflow] Verifying task ID: ${params.taskId}`);
+        const task = await step.do(
+            "verify-task",
+            {
+                retries: { limit: 5, delay: '5 seconds', backoff: 'exponential' },
+                timeout: '2 minutes'
+            },
+            async () => {
+                console.log(`[TaskWorkflow] Verifying task ID: ${params.taskId}`);
 
+                const result = await this.env.DB.prepare(
+                    'SELECT * FROM tasks WHERE id = ? AND user_id = ?'
+                ).bind(params.taskId, params.userId).first();
+
+                if(!result) {
+                    // Business logic error - task doesn't exist (non-retryable)
+                    throw new Error('Task not found');
+                }
+
+                return {
+                    id: result.id as string,
+                    userId: result.user_id as string,
+                    title: result.title as string,
+                    description: result.description as string | undefined,
+                    dueDate: result.due_date as number | undefined,
+                    completed: Boolean(result.completed),
+                    priority: (result.priority as 'low' | 'medium' | 'high') || 'medium',
+                    createdAt: result.created_at as number,
+                };
+
+            }
+        );
+
+        if(task.completed) {
+            console.log(`[TaskWorkflow] Task ${params.taskId} already completed, skipping reminder`);
+        return {
+          success: true,
+          message: 'Task already completed, reminder skipped',
+          reminderSent: false,
+          taskId: params.taskId,
+        };
+      }
+
+    const reminderTime = await step.do(
+        'calculate-reminder-time',
+        {
+            retries: { limit: 5, delay: '5 seconds', backoff: 'exponential' },
+            timeout: '2 minutes'
+        },
+        async () => {
+            console.log(`[TaskWorkflow] Calculating reminder time for task ID: ${params.taskId}`);
+
+            const dueDate = params.dueDate || task.dueDate;
+            if (!dueDate) {
+                // Business logic error - no due date configured (non-retryable)
+                throw new Error('No due date set for task');
+            }
+
+            const reminderTimestamp = dueDate - (24 * 60 * 60)
+            const now = Math.floor(Date.now() / 1000);
+
+            return {
+                reminderTimestamp,
+                dueDate,
+                shouldSendNow: reminderTimestamp <= now,
+                timeUntilReminder: Math.max( 0, reminderTimestamp - now)
+            };
+        }
+    );
+
+      if(!reminderTime.shouldSendNow && reminderTime.timeUntilReminder > 0) {
+        await step.sleep('wait-for-reminder-time', `${reminderTime.timeUntilReminder} seconds`);
+        console.log(`[TaskWorkflow] Woke up after ${reminderTime.timeUntilReminder} s sleep`);
+      }
+
+      const freshTask = await step.do(
+        'recheck-task-status',
+        {
+            retries: { limit: 5, delay: '5 seconds', backoff: 'exponential' },
+            timeout: '2 minutes'
+        },
+        async () => {
+            console.log(`[TaskWorkflow] Rechecking task status before sending reminder`);
             const result = await this.env.DB.prepare(
                 'SELECT * FROM tasks WHERE id = ? AND user_id = ?'
             ).bind(params.taskId, params.userId).first();
 
-            if(!result) {
-                throw new Error('Task not found');
+            if (!result) {
+                return null;
             }
 
             return {
@@ -86,58 +169,10 @@ export class TaskWorkflow extends WorkflowEntrypoint<Env, TaskWorkflowParams> {
                 priority: (result.priority as 'low' | 'medium' | 'high') || 'medium',
                 createdAt: result.created_at as number,
             };
-
-        });
-
-        if(task.completed) {
-            console.log(`[TaskWorkflow] Task ${params.taskId} already completed, skipping reminder`);
-        return {
-          success: true,
-          message: 'Task already completed, reminder skipped',
-          reminderSent: false,
-          taskId: params.taskId,
-        };
-      }
-
-    const reminderTime = await step.do('calculate-reminder-time', async () => {
-
-        console.log(`[TaskWorkflow] Calculating reminder time for task ID: ${params.taskId}`);
-
-        const dueDate = params.dueDate || task.dueDate;
-        if (!dueDate) {
-            throw new Error('No due date set for task');
         }
+    );
 
-        const reminderTimestamp = dueDate - (24 * 60 * 60) 
-        const now = Math.floor(Date.now() / 1000);
-
-        return {
-            reminderTimestamp,
-            dueDate,
-            shouldSendNow: reminderTimestamp <= now,
-            timeUntilReminder: Math.max( 0, reminderTimestamp - now)
-        };
-      });
-
-      if(!reminderTime.shouldSendNow && reminderTime.timeUntilReminder > 0) {
-        await step.sleep('wait-for-reminder-time', reminderTime.timeUntilReminder * 1000);
-        console.log(`[TaskWorkflow] Woke up after ${reminderTime.timeUntilReminder} s sleep`);
-      }
-
-      const taskStillIncomplete = await step.do('recheck-task-status', async () => {
-        console.log(`[TaskWorkflow] Rechecking task status before sending reminder`);
-        const result = await this.env.DB.prepare(
-            'SELECT completed FROM tasks WHERE id = ? AND user_id = ?'
-        ).bind(params.taskId, params.userId).first();
-        
-        if (!result) {
-            return false; 
-        }
-
-        return !Boolean(result.completed);
-    });
-
-    if (!taskStillIncomplete) {
+    if (!freshTask || freshTask.completed) {
         console.log(`[TaskWorkflow] Task ${params.taskId} completed or deleted, skipping reminder`);
         return {
           success: true,
@@ -147,37 +182,45 @@ export class TaskWorkflow extends WorkflowEntrypoint<Env, TaskWorkflowParams> {
         };
     }
 
-    const reminderSent = await step.do('send-reminder', async () => {
-        console.log(`[TaskWorkflow] Sending reminder for task title: ${task.title}`);
+    const reminderSent = await step.do(
+        'send-reminder',
+        {
+            retries: { limit: 5, delay: '5 seconds', backoff: 'exponential' },
+            timeout: '2 minutes'
+        },
+        async () => {
+            console.log(`[TaskWorkflow] Sending reminder for task title: ${freshTask.title}`);
 
-        const reminderMessage = `Reminder: Task "${task.title}" is due in 24 hours (Priority: ${task.priority})`
-        const messageId = crypto.randomUUID();
+            const reminderMessage = `Reminder: Task "${freshTask.title}" is due in 24 hours (Priority: ${freshTask.priority})`
+            // Deterministic ID based on taskId and workflow event ID for idempotency
+            const messageId = `reminder-${params.taskId}-${workflowEventId}`;
 
-        const now = Math.floor(Date.now() / 1000);
+            const now = Math.floor(Date.now() / 1000);
 
-        await this.env.DB.prepare(
-            'INSERT INTO conversations (id, user_id, role, content, timestamp, metadata) VALUES (?, ?, ?, ?, ?, ?)'
-        ).bind(
-          messageId,
-          params.userId,
-          'system',
-          reminderMessage,
-          now,
-          JSON.stringify({ type: 'task_reminder', taskId: params.taskId })
-        ).run();
+            await this.env.DB.prepare(
+                'INSERT INTO conversations (id, user_id, role, content, timestamp, metadata) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING'
+            ).bind(
+              messageId,
+              params.userId,
+              'system',
+              reminderMessage,
+              now,
+              JSON.stringify({ type: 'task_reminder', taskId: params.taskId })
+            ).run();
 
-        console.log(`[TaskWorkflow] Reminder message stored with ID: ${messageId}`);
-        return true;
-    });
+            console.log(`[TaskWorkflow] Reminder message stored with ID: ${messageId}`);
+            return true;
+        }
+    );
 
     return {
         success: true,
-        message: `Reminder sent for task: ${task.title}`,
+        message: `Reminder sent for task: ${freshTask.title}`,
         reminderSent,
         scheduledFor: reminderTime.reminderTimestamp,
         taskId: params.taskId,
         data: {
-            taskTitle: task.title,
+            taskTitle: freshTask.title,
             dueDate: reminderTime.dueDate
         },
     };
@@ -193,16 +236,23 @@ private async handleDecomposeWorkflow(
     step: WorkflowStep
 ): Promise<ReminderResult> {
 
-    const decomposed = await step.do('decompose-task', async () => {
-        console.log(`[TaskWorkflow] Decomposing task ${params.taskId}`);
+    const decomposed = await step.do(
+        'decompose-task',
+        {
+            retries: { limit: 5, delay: '5 seconds', backoff: 'exponential' },
+            timeout: '2 minutes'
+        },
+        async () => {
+            console.log(`[TaskWorkflow] Decomposing task ${params.taskId}`);
 
-        // TODO Phase 3: Use Workers AI to analyze task and create subtasks
-        // For now, just log the action
-        return {
-          subtasksCreated: 0,
-          message: 'Task decomposition not yet implemented (Phase 3)',
-        };
-    });
+            // TODO Phase 3: Use Workers AI to analyze task and create subtasks
+            // For now, just log the action
+            return {
+              subtasksCreated: 0,
+              message: 'Task decomposition not yet implemented (Phase 3)',
+            };
+        }
+    );
 
     return {
         success: true,
@@ -221,15 +271,22 @@ private async handleScheduleWorkflow(
     step: WorkflowStep
 ): Promise<ReminderResult> {
 
-    const scheduled = await step.do('schedule-task', async () => {
-    console.log(`[TaskWorkflow] Scheduling task ${params.taskId}`);
+    const scheduled = await step.do(
+        'schedule-task',
+        {
+            retries: { limit: 5, delay: '5 seconds', backoff: 'exponential' },
+            timeout: '2 minutes'
+        },
+        async () => {
+            console.log(`[TaskWorkflow] Scheduling task ${params.taskId}`);
 
-    // TODO: Implement scheduled task execution
-    return {
-        scheduled: true,
-        message: 'Scheduled execution not yet implemented',
-    };
-    });
+            // TODO: Implement scheduled task execution
+            return {
+                scheduled: true,
+                message: 'Scheduled execution not yet implemented',
+            };
+        }
+    );
 
     return {
     success: true,
@@ -246,17 +303,24 @@ private async handleCleanupWorkflow(
     step: WorkflowStep
 ): Promise<ReminderResult> {
 
-    const deletedCount = await step.do('cleanup-old-tasks', async () => {
-        console.log(`[TaskWorkflow] Cleaning up old completed tasks for user ${params.userId}`);
+    const deletedCount = await step.do(
+        'cleanup-old-tasks',
+        {
+            retries: { limit: 5, delay: '5 seconds', backoff: 'exponential' },
+            timeout: '2 minutes'
+        },
+        async () => {
+            console.log(`[TaskWorkflow] Cleaning up old completed tasks for user ${params.userId}`);
 
-        const thirtyDaysAgo = Math.floor(Date.now() / 1000) - (30 * 24 * 60 * 60);
+            const thirtyDaysAgo = Math.floor(Date.now() / 1000) - (30 * 24 * 60 * 60);
 
-        const result = await this.env.DB.prepare(
-            'DELETE FROM tasks WHERE user_id = ? AND completed = 1 AND completed_at < ?'
-        ).bind(params.userId, thirtyDaysAgo).run()
+            const result = await this.env.DB.prepare(
+                'DELETE FROM tasks WHERE user_id = ? AND completed = 1 AND completed_at < ?'
+            ).bind(params.userId, thirtyDaysAgo).run()
 
-        return result.meta.changes || 0;
-    });
+            return result.meta.changes || 0;
+        }
+    );
 
     return {
         success: true,

@@ -20,6 +20,46 @@ import { ToolDefinition, ToolContext, ToolResult, SendEmailSchema, SendEmailPara
           };
         }
 
+        // Security: Rate limiting - 10 emails per hour per user
+        if (!context.agent.checkRateLimit(context.userId, 'email', 10, 3600000)) {
+          return {
+            success: false,
+            error: 'Rate limit exceeded. You can send up to 10 emails per hour. Please try again later.',
+          };
+        }
+
+        // Security: Spam prevention - validate subject length (max 200 chars)
+        if (subject.length > 200) {
+          return {
+            success: false,
+            error: 'Email subject too long (max 200 characters)',
+          };
+        }
+
+        // Security: Spam prevention - validate body length (max 10KB)
+        const MAX_BODY_LENGTH = 10 * 1024;
+        if (textBody.length > MAX_BODY_LENGTH) {
+          return {
+            success: false,
+            error: `Email body too long (max ${MAX_BODY_LENGTH} characters)`,
+          };
+        }
+
+        // Security: Strip all HTML from htmlBody to prevent XSS attacks
+        let sanitizedHtmlBody: string | undefined = undefined;
+        if (htmlBody) {
+          // Remove all HTML tags (simple but effective for security)
+          sanitizedHtmlBody = htmlBody.replace(/<[^>]*>/g, '');
+
+          // Also validate sanitized HTML length
+          if (sanitizedHtmlBody.length > MAX_BODY_LENGTH) {
+            return {
+              success: false,
+              error: `Email HTML body too long (max ${MAX_BODY_LENGTH} characters)`,
+            };
+          }
+        }
+
         // Call PostMark API
         const response = await fetch('https://api.postmarkapp.com/email', {
           method: 'POST',
@@ -33,7 +73,7 @@ import { ToolDefinition, ToolContext, ToolResult, SendEmailSchema, SendEmailPara
             To: to,
             Subject: subject,
             TextBody: textBody,
-            HtmlBody: htmlBody,
+            HtmlBody: sanitizedHtmlBody, // Use sanitized HTML (all tags stripped)
           }),
         });
 
@@ -53,6 +93,9 @@ import { ToolDefinition, ToolContext, ToolResult, SendEmailSchema, SendEmailPara
           to: data.To,
           submittedAt: data.SubmittedAt,
         };
+
+        // Record successful email send for rate limiting
+        context.agent.recordRateLimitCall(context.userId, 'email');
 
         return {
           success: true,

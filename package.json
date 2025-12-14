@@ -6,25 +6,31 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "d1:migrate": "wrangler d1 migrations apply agent_cloud_db",
-    "d1:local": "wrangler d1 migrations apply agent_cloud_db --local",
+    "d1:migrate": "wrangler d1 migrations apply agent_db",
+    "d1:local": "wrangler d1 migrations apply agent_db --local",
     "vectorize:create": "wrangler vectorize create agent-memory --dimensions=768 --metric=cosine",
     "pages:dev": "wrangler pages dev ./frontend/dist",
     "pages:deploy": "wrangler pages deploy ./frontend/dist"
   },
-  "keywords": ["cloudflare", "workers", "ai", "agent", "llm"],
+  "keywords": [
+    "cloudflare",
+    "workers",
+    "ai",
+    "agent",
+    "llm"
+  ],
   "author": "Your Name",
   "license": "MIT",
   "dependencies": {
-    "agents": "^0.1.0",
-    "hono": "^4.0.0",
     "@modelcontextprotocol/sdk": "^1.0.4",
+    "agents": "^0.2.32",
+    "hono": "^4.0.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241127.0",
     "@types/node": "^22.0.0",
     "typescript": "^5.7.0",
-    "wrangler": "^3.95.0"
+    "wrangler": "4.54.0"
   }
 }

@@ -48,7 +48,13 @@ export interface WSMessage {
     | 'connected'
     | 'confirmation_request'
     | 'confirmation_response'
-    | 'tool_execution_result';
+    | 'tool_execution_result'
+    | 'create_task'
+    | 'list_tasks'
+    | 'complete_task'
+    | 'update_task'
+    | 'delete_task'
+    | 'ping';
 
 
   export interface ChatPayload {
