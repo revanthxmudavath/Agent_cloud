@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
-  role TEXT NOT NULL, -- 'user' or 'assistant'
+  role TEXT NOT NULL, -- 'user' or 'assistant' or 'system'
   content TEXT NOT NULL,
   timestamp INTEGER DEFAULT (unixepoch()),
   metadata TEXT, -- JSON blob for additional context

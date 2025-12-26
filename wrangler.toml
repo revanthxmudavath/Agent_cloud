@@ -15,7 +15,7 @@ binding = "AI"
 [[durable_objects.bindings]]
 name = "AGENT"
 class_name = "PersonalAssistant"
-script_name = "agent-db"
+
 
 # D1 Database for persistent storage
 [[d1_databases]]
@@ -52,3 +52,10 @@ LLM_MAX_TOKENS = "500"
 LLM_TEMPERATURE = "0.7"
 RAG_ENABLED = "true"
 RAG_TOP_K = "3"
+
+[observability]
+[observability.logs]
+enabled = false
+head_sampling_rate = 1
+invocation_logs = true
+persist = true
