@@ -15,7 +15,7 @@ binding = "AI"
 [[durable_objects.bindings]]
 name = "AGENT"
 class_name = "PersonalAssistant"
-script_name = "agent-db"
+
 
 # D1 Database for persistent storage
 [[d1_databases]]

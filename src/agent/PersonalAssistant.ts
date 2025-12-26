@@ -4,7 +4,7 @@ import { VectorizeManager } from './vectorize';
 import { MemoryManager, DEFAULT_SYSTEM_PROMPT, memoryManager } from './memory';
 
 import { ConfirmationHandler, createConfirmationHandler } from '../mcp/ConfirmationHandler';
-import { generateToolDocs } from '../mcp/CodeModeAPI';
+
 import { getTool } from '../mcp/tools/index';
 import { ToolContext } from '../types/tools';
 
@@ -1187,9 +1187,8 @@ private formatToolResultAsSystemMessage(
 
         case 'createTask': {
           const task = result.output as any;
-          return `[Task Created] "${task.title}" (ID: ${task.id}, Priority: ${task.priority}${task.dueDate ? ', Due: ' + new Date(task.dueDate).toISOString() : ''})`;   
+          return `[Task Created] "${task.title}" (ID: ${task.id}, Priority: ${task.priority}${task.dueDate ? ', Due: ' + new Date(task.dueDate * 1000).toISOString() : ''})`;   
         }
-
         case 'listTasks': {
           const tasks = result.output as any[];
           if (tasks.length === 0) {
